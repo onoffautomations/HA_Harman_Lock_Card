@@ -2,7 +2,7 @@ name: Attach HA Harman Lock Card ZIP on Release
 
 on:
   release:
-    types: [published]
+    types: [ published ]
 
 permissions:
   contents: write
@@ -10,22 +10,54 @@ permissions:
 jobs:
   attach-asset:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Package HA Harman Lock Card
+        shell: bash
         run: |
-          cd custom_components/HA_Harman_Lock_Card
-          zip -r __artifact__.zip .
-          mv __artifact__.zip $GITHUB_WORKSPACE/HA_Harman_Lock_Card.zip
-          echo "ASSET=HA_Harman_Lock_Card.zip" >> $GITHUB_ENV
+          set -euo pipefail
+
+          REPO_NAME="HA_Harman_Lock_Card"
+          ZIP_NAME="${REPO_NAME}.zip"
+
+          echo "Repo contents:"
+          ls -la
+          echo "Dist contents (if exists):"
+          ls -la dist || true
+
+          # Basic sanity checks
+          if [ ! -f "hacs.json" ]; then
+            echo "ERROR: hacs.json not found in repo root."
+            exit 1
+          fi
+
+          if [ ! -f "README.md" ] && [ ! -f "readme.md" ]; then
+            echo "ERROR: README.md not found in repo root."
+            exit 1
+          fi
+
+          # HACS plugin expects JS either in dist/ or root
+          if [ -f "dist/${REPO_NAME}.js" ]; then
+            echo "Found dist/${REPO_NAME}.js"
+            rm -f "${ZIP_NAME}"
+            zip -r "${ZIP_NAME}" dist hacs.json README.md LICENSE 2>/dev/null || zip -r "${ZIP_NAME}" dist hacs.json README.md
+          elif [ -f "${REPO_NAME}.js" ]; then
+            echo "Found ${REPO_NAME}.js in root"
+            rm -f "${ZIP_NAME}"
+            zip -r "${ZIP_NAME}" "${REPO_NAME}.js" hacs.json README.md LICENSE 2>/dev/null || zip -r "${ZIP_NAME}" "${REPO_NAME}.js" hacs.json README.md
+          else
+            echo "ERROR: Missing JS build."
+            echo "Expected dist/${REPO_NAME}.js OR ${REPO_NAME}.js in repo root."
+            exit 1
+          fi
+
+          echo "ASSET=${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Upload ZIP Asset
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
           files: ${{ env.ASSET }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

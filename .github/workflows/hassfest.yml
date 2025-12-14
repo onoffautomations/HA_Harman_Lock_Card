@@ -1,15 +1,14 @@
-name: Validate with hassfest
+name: Hassfest (disabled - this repo is a Lovelace card)
 
 on:
-  push:
-  pull_request:
-  schedule:
-    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
-  hassfest:
+  info:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Run hassfest
-        uses: home-assistant/actions/hassfest@master
+      - name: This repo is a Lovelace card (plugin)
+        run: |
+          echo "This repository is a Lovelace card, not a Home Assistant integration."
+          echo "Hassfest is for custom_components integrations, so it is disabled here."
+          echo "Use HACS validation (plugin) instead."

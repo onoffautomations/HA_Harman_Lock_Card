@@ -16,6 +16,7 @@ class HartmanDoorLockCard extends HTMLElement {
     this._pulseGrid = config.pulse_grid || false;
     this._gridColumns = config.columns || 4;
     this._customName = config.name || '';
+    this._nameTextCase = config.name_text_case || 'uppercase'; // uppercase, capitalize, none
     this._textCase = config.text_case || 'uppercase'; // uppercase, capitalize, none
     this._showLog = config.show_log !== false; // Default to true for backward compatibility
   }
@@ -30,9 +31,10 @@ class HartmanDoorLockCard extends HTMLElement {
     return this._advanced && this._expanded ? 4 : 2;
   }
 
-  formatText(text) {
+  formatText(text, useNameCase = false) {
     if (!text) return '';
-    switch (this._textCase) {
+    const textCase = useNameCase ? this._nameTextCase : this._textCase;
+    switch (textCase) {
       case 'uppercase':
         return text.toUpperCase();
       case 'capitalize':
@@ -72,8 +74,9 @@ class HartmanDoorLockCard extends HTMLElement {
     }
   }
 
-  getTextCaseStyle() {
-    switch (this._textCase) {
+  getTextCaseStyle(useNameCase = false) {
+    const textCase = useNameCase ? this._nameTextCase : this._textCase;
+    switch (textCase) {
       case 'uppercase':
         return 'text-transform: uppercase; letter-spacing: 0.5px;';
       case 'capitalize':
@@ -126,6 +129,7 @@ class HartmanDoorLockCard extends HTMLElement {
     }
 
     const doorName = this._customName || this._entity.replace(/_/g, ' ').replace(/panel (\d+) door (\d+)/i, 'Door $2');
+    const nameTextCaseStyle = this.getTextCaseStyle(true);
     const textCaseStyle = this.getTextCaseStyle();
 
     // Pulse Grid mode (small clean button)
@@ -176,9 +180,9 @@ class HartmanDoorLockCard extends HTMLElement {
             color: var(--primary-text-color, #333);
             text-align: center;
             line-height: 1.2;
-            ${textCaseStyle}
+            ${nameTextCaseStyle}
           }
-          
+
           .pulse-grid-btn {
             background: #9b59b6;
             border: none;
@@ -199,7 +203,7 @@ class HartmanDoorLockCard extends HTMLElement {
         
         <div class="pulse-grid-card" id="cardClick">
           <div class="status-indicator"></div>
-          <div class="pulse-grid-name">${this.formatText(doorName)}</div>
+          <div class="pulse-grid-name">${this.formatText(doorName, true)}</div>
           <button class="pulse-grid-btn" id="pulseBtn">${this.formatText('Pulse')}</button>
         </div>
       `;
@@ -248,7 +252,7 @@ class HartmanDoorLockCard extends HTMLElement {
             font-size: 13px;
             font-weight: 600;
             color: var(--primary-text-color, #333);
-            ${textCaseStyle}
+            ${nameTextCaseStyle}
           }
           
           .pulse-status {
@@ -285,7 +289,7 @@ class HartmanDoorLockCard extends HTMLElement {
           <div class="pulse-info">
             <div class="pulse-indicator"></div>
             <div>
-              <div class="pulse-name">${this.formatText(doorName)}</div>
+              <div class="pulse-name">${this.formatText(doorName, true)}</div>
               <div class="pulse-status">${statusText}</div>
             </div>
           </div>
@@ -334,13 +338,21 @@ class HartmanDoorLockCard extends HTMLElement {
           font-size: 15px;
           font-weight: 600;
           color: var(--primary-text-color, #333);
-          ${textCaseStyle}
+          ${nameTextCaseStyle}
         }
 
         .door-status {
           font-size: 11px;
           color: var(--secondary-text-color, #666);
           margin-top: 2px;
+          ${textCaseStyle}
+        }
+
+        .override-note {
+          font-size: 9px;
+          color: var(--secondary-text-color, #999);
+          font-style: italic;
+          margin-top: 4px;
           ${textCaseStyle}
         }
 
@@ -591,8 +603,9 @@ class HartmanDoorLockCard extends HTMLElement {
         <div class="header">
           <div class="status-dot"></div>
           <div>
-            <div class="door-name">${this.formatText(doorName)}</div>
+            <div class="door-name">${this.formatText(doorName, true)}</div>
             <div class="door-status">${this.formatText(statusText)}${readerMode ? ` · ${this.formatText(readerMode.state)}` : ''} · Controlled by ${this.formatText(controlledBy)}</div>
+            ${this._advanced ? `<div class="override-note">${this.formatText('Note: Override buttons require double-click to activate')}</div>` : ''}
           </div>
         </div>
 
@@ -624,12 +637,6 @@ class HartmanDoorLockCard extends HTMLElement {
             ${this._expanded ? `
               <div class="advanced-content">
                 <div class="override-section">
-                  <div class="override-hint">
-                    <span style="font-size: 9px; color: var(--secondary-text-color, #999); font-style: italic;">
-                      Note: Override buttons require double-click to activate
-                    </span>
-                  </div>
-
                   <div class="override-controls">
                     <div class="field">
                       <div class="field-label">${this.formatText('Duration (Minutes)')}</div>
@@ -859,6 +866,7 @@ class HartmanDoorLockCard extends HTMLElement {
       pulse_only: false,
       pulse_grid: false,
       columns: 4,
+      name_text_case: "uppercase",
       text_case: "uppercase",
       show_log: true
     };
@@ -869,14 +877,15 @@ class HartmanDoorLockCard extends HTMLElement {
 class HartmanDoorLockCardEditor extends HTMLElement {
   setConfig(config) {
     this._config = config || {};
-    if (this._hass) {
+    // Only render if we haven't initialized yet
+    if (!this._initialized && this._hass) {
       this.render();
     }
   }
 
   set hass(hass) {
     this._hass = hass;
-    if (this._config) {
+    if (this._config && !this._initialized) {
       this.render();
     }
   }
@@ -903,6 +912,7 @@ class HartmanDoorLockCardEditor extends HTMLElement {
     }
 
     const doors = this.getDoorEntities();
+    this._initialized = true;
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -1012,22 +1022,20 @@ class HartmanDoorLockCardEditor extends HTMLElement {
       <div class="config-row">
         <div class="field-row">
           <div>
-            <label>Text Style</label>
-            <select id="text_case">
-              <option value="uppercase" ${this._config?.text_case === 'uppercase' ? 'selected' : ''}>UPPERCASE</option>
-              <option value="capitalize" ${this._config?.text_case === 'capitalize' ? 'selected' : ''}>Capitalize First</option>
-              <option value="none" ${this._config?.text_case === 'none' ? 'selected' : ''}>Normal</option>
+            <label>Card Name Style</label>
+            <select id="name_text_case">
+              <option value="uppercase" ${this._config?.name_text_case === 'uppercase' || !this._config?.name_text_case ? 'selected' : ''}>UPPERCASE</option>
+              <option value="capitalize" ${this._config?.name_text_case === 'capitalize' ? 'selected' : ''}>Capitalize First</option>
+              <option value="none" ${this._config?.name_text_case === 'none' ? 'selected' : ''}>Normal</option>
             </select>
           </div>
           <div>
-            <label>Grid Columns</label>
-            <input
-              type="number"
-              id="columns"
-              value="${this._config?.columns || 4}"
-              min="1"
-              max="12"
-            />
+            <label>Other Text Style</label>
+            <select id="text_case">
+              <option value="uppercase" ${this._config?.text_case === 'uppercase' || !this._config?.text_case ? 'selected' : ''}>UPPERCASE</option>
+              <option value="capitalize" ${this._config?.text_case === 'capitalize' ? 'selected' : ''}>Capitalize First</option>
+              <option value="none" ${this._config?.text_case === 'none' ? 'selected' : ''}>Normal</option>
+            </select>
           </div>
         </div>
       </div>
@@ -1078,6 +1086,12 @@ class HartmanDoorLockCardEditor extends HTMLElement {
         </label>
         <div class="hint" style="margin-left: 26px;">Display the last door access log in advanced mode</div>
       </div>
+
+      <div style="text-align: center; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--divider-color, #eee);">
+        <div style="font-size: 10px; color: var(--secondary-text-color, #999); text-transform: uppercase; letter-spacing: 0.5px;">
+          Hartman Door Lock Card v1.1.0
+        </div>
+      </div>
     `;
 
     const entitySelect = this.shadowRoot.getElementById('entity');
@@ -1085,8 +1099,8 @@ class HartmanDoorLockCardEditor extends HTMLElement {
     const advancedInput = this.shadowRoot.getElementById('advanced');
     const pulseOnlyInput = this.shadowRoot.getElementById('pulse_only');
     const pulseGridInput = this.shadowRoot.getElementById('pulse_grid');
+    const nameTextCaseSelect = this.shadowRoot.getElementById('name_text_case');
     const textCaseSelect = this.shadowRoot.getElementById('text_case');
-    const columnsInput = this.shadowRoot.getElementById('columns');
     const showLogInput = this.shadowRoot.getElementById('show_log');
 
     entitySelect.addEventListener('change', (e) => {
@@ -1124,13 +1138,13 @@ class HartmanDoorLockCardEditor extends HTMLElement {
       this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._config } }));
     });
 
-    textCaseSelect.addEventListener('change', (e) => {
-      this._config = { ...this._config, text_case: e.target.value };
+    nameTextCaseSelect.addEventListener('change', (e) => {
+      this._config = { ...this._config, name_text_case: e.target.value };
       this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._config } }));
     });
 
-    columnsInput.addEventListener('change', (e) => {
-      this._config = { ...this._config, columns: parseInt(e.target.value) || 4 };
+    textCaseSelect.addEventListener('change', (e) => {
+      this._config = { ...this._config, text_case: e.target.value };
       this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._config } }));
     });
 
@@ -1152,7 +1166,7 @@ window.customCards.push({
 });
 
 console.info(
-  '%c HARTMAN-DOOR-LOCK-CARD %c 2.3.0 ',
+  '%c HARTMAN-DOOR-LOCK-CARD %c 1.1.0 ',
   'color: white; background: #4caf50; font-weight: 700;',
   'color: #4caf50; background: white; font-weight: 700;'
 );

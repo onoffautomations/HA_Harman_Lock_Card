@@ -3,6 +3,7 @@ class HartmanDoorLockCard extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this._expanded = false;
+    this._lastRenderState = null;
   }
 
   setConfig(config) {
@@ -19,11 +20,53 @@ class HartmanDoorLockCard extends HTMLElement {
     this._nameTextCase = config.name_text_case || 'uppercase'; // uppercase, capitalize, none
     this._textCase = config.text_case || 'uppercase'; // uppercase, capitalize, none
     this._showLog = config.show_log !== false; // Default to true for backward compatibility
+    this._purpleOutline = config.purple_outline !== false; // Default to true
+    this._showDoubleClickNote = config.show_double_click_note !== false; // Default to true
   }
 
   set hass(hass) {
+    const oldHass = this._hass;
     this._hass = hass;
-    this.render();
+
+    // Only re-render if relevant entities have changed or if entity not configured yet
+    if (!this._entity || !oldHass || this._hasStateChanged(oldHass, hass)) {
+      this.render();
+    }
+  }
+
+  _hasStateChanged(oldHass, newHass) {
+    if (!this._entity) return true;
+
+    const entities = [
+      `sensor.${this._entity}_lock_state`,
+      `switch.${this._entity}_override`,
+      `sensor.${this._entity}_overridden`,
+      `select.${this._entity}_override_mode`,
+      `select.${this._entity}_override_type`,
+      `number.${this._entity}_override_minutes`,
+      `sensor.${this._entity}_reader_mode`,
+      `sensor.${this._entity}_last_door_log_by`
+    ];
+
+    return entities.some(entity => {
+      const oldState = oldHass.states[entity];
+      const newState = newHass.states[entity];
+
+      if (!oldState && !newState) return false;
+      if (!oldState || !newState) return true;
+
+      // Check if state or attributes changed
+      if (oldState.state !== newState.state) return true;
+
+      // For last_door_log_by, also check the timestamp attribute
+      if (entity.includes('last_door_log_by')) {
+        const oldTime = oldState.attributes?.['Reader Message Time'] || oldState.attributes?.reader_message_time;
+        const newTime = newState.attributes?.['Reader Message Time'] || newState.attributes?.reader_message_time;
+        if (oldTime !== newTime) return true;
+      }
+
+      return false;
+    });
   }
 
   getCardSize() {
@@ -137,8 +180,16 @@ class HartmanDoorLockCard extends HTMLElement {
       this.shadowRoot.innerHTML = `
         <style>
           * { box-sizing: border-box; margin: 0; padding: 0; }
-          :host { display: block; }
-          
+          :host {
+            display: block;
+            position: relative;
+            z-index: 1;
+          }
+
+          :host(.dialog-open) {
+            z-index: 99999999 !important;
+          }
+
           .pulse-grid-card {
             background: var(--ha-card-background, #fff);
             border-radius: 12px;
@@ -153,16 +204,22 @@ class HartmanDoorLockCard extends HTMLElement {
             transition: all 0.15s ease;
             position: relative;
             min-height: 80px;
+            overflow: visible;
+            ${this._purpleOutline ? 'border: 2px solid #9b59b6;' : ''}
           }
-          
+
+          .pulse-grid-card.advanced-mode {
+            box-shadow: 0 2px 8px rgba(155, 89, 182, 0.25), 0 0 0 1px rgba(155, 89, 182, 0.1);
+          }
+
           .pulse-grid-card:hover {
             background: var(--secondary-background-color, #f5f5f5);
           }
-          
+
           .pulse-grid-card:active {
             transform: scale(0.97);
           }
-          
+
           .status-indicator {
             width: 8px;
             height: 8px;
@@ -173,7 +230,23 @@ class HartmanDoorLockCard extends HTMLElement {
             top: 10px;
             right: 10px;
           }
-          
+
+          .advanced-indicator {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            width: 14px;
+            height: 14px;
+            background: linear-gradient(135deg, #9b59b6, #8e44ad);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 8px;
+            color: white;
+            box-shadow: 0 1px 3px rgba(155, 89, 182, 0.4);
+          }
+
           .pulse-grid-name {
             font-size: 11px;
             font-weight: 600;
@@ -195,23 +268,516 @@ class HartmanDoorLockCard extends HTMLElement {
             cursor: pointer;
             transition: all 0.15s ease;
           }
-          
+
           .pulse-grid-btn:hover {
             background: #8e44ad;
           }
+
+          .dialog-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.6);
+            z-index: 2147483647;
+            backdrop-filter: blur(3px);
+            -webkit-backdrop-filter: blur(3px);
+          }
+
+          .dialog-overlay.open {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+
+          .dialog-content {
+            background: var(--ha-card-background, #fff);
+            border-radius: 16px;
+            padding: 0;
+            width: 400px;
+            max-width: 90vw;
+            max-height: 80vh;
+            overflow: hidden;
+            box-shadow: 0 12px 48px rgba(0,0,0,0.4);
+            position: relative;
+            animation: slideIn 0.2s ease-out;
+            z-index: 2147483647;
+          }
+
+          .dialog-content.dragging {
+            cursor: grabbing;
+            user-select: none;
+            position: fixed;
+          }
+
+          .dialog-progress {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 3px;
+            background: rgba(155, 89, 182, 0.2);
+            overflow: hidden;
+            border-radius: 0 0 16px 16px;
+          }
+
+          .dialog-progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #9b59b6, #8e44ad);
+            width: 100%;
+            transform-origin: left;
+            animation: countdown 10s linear forwards;
+          }
+
+          @keyframes countdown {
+            from {
+              transform: scaleX(1);
+            }
+            to {
+              transform: scaleX(0);
+            }
+          }
+
+          @keyframes slideIn {
+            from {
+              transform: scale(0.95);
+              opacity: 0;
+            }
+            to {
+              transform: scale(1);
+              opacity: 1;
+            }
+          }
+
+          .dialog-header {
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--divider-color, #eee);
+            position: sticky;
+            top: 0;
+            background: var(--ha-card-background, #fff);
+            z-index: 10;
+            cursor: grab;
+            user-select: none;
+          }
+
+          .dialog-header:active {
+            cursor: grabbing;
+          }
+
+          .dialog-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--primary-text-color, #333);
+            ${nameTextCaseStyle}
+          }
+
+          .close-btn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: var(--secondary-text-color, #999);
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: all 0.2s;
+          }
+
+          .close-btn:hover {
+            background: var(--secondary-background-color, #f5f5f5);
+            color: var(--primary-text-color, #333);
+          }
+
+          .dialog-body {
+            padding: 16px;
+            max-height: calc(80vh - 73px - 3px);
+            overflow-y: auto;
+          }
+
+          .dialog-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px;
+            background: var(--secondary-background-color, #fafafa);
+            border-radius: 8px;
+            margin-bottom: 16px;
+          }
+
+          .dialog-status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: ${statusColor};
+            box-shadow: 0 0 8px ${statusColor}80;
+          }
+
+          .dialog-status-text {
+            font-size: 12px;
+            color: var(--primary-text-color, #333);
+            ${textCaseStyle}
+          }
+
+          .dialog-note {
+            font-size: 10px;
+            color: var(--secondary-text-color, #999);
+            font-style: italic;
+            margin-top: 8px;
+            margin-bottom: 8px;
+            text-align: center;
+            ${textCaseStyle}
+          }
+
+          .dialog-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+          }
+
+          .dialog-action-btn {
+            border: none;
+            border-radius: 8px;
+            padding: 14px 12px;
+            font-size: 11px;
+            font-weight: 600;
+            ${textCaseStyle}
+            cursor: pointer;
+            transition: all 0.15s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+          }
+
+          .dialog-action-btn:active:not(:disabled) {
+            transform: scale(0.96);
+          }
+
+          .dialog-action-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+          }
+
+          .dialog-action-btn.pulse { background: #9b59b6; color: white; }
+          .dialog-action-btn.pulse:hover:not(:disabled) { background: #8e44ad; }
+          .dialog-action-btn.lockdown { background: #e74c3c; color: white; }
+          .dialog-action-btn.lockdown:hover:not(:disabled) { background: #c0392b; }
+          .dialog-action-btn.unlock { background: #2ecc71; color: white; }
+          .dialog-action-btn.unlock:hover:not(:disabled) { background: #27ae60; }
+          .dialog-action-btn.resume { background: #3498db; color: white; }
+          .dialog-action-btn.resume:hover:not(:disabled) { background: #2980b9; }
+
+          .dialog-btn-icon {
+            font-size: 18px;
+          }
         </style>
-        
-        <div class="pulse-grid-card" id="cardClick">
+
+        <div class="pulse-grid-card ${this._advanced ? 'advanced-mode' : ''}" id="cardClick">
+          ${this._advanced ? '<div class="advanced-indicator">⚙</div>' : ''}
           <div class="status-indicator"></div>
           <div class="pulse-grid-name">${this.formatText(doorName, true)}</div>
           <button class="pulse-grid-btn" id="pulseBtn">${this.formatText('Pulse')}</button>
         </div>
+
+        ${this._advanced ? `
+          <div class="dialog-overlay" id="dialogOverlay">
+            <div class="dialog-content" id="dialogContent">
+              <div class="dialog-header">
+                <div class="dialog-title">${this.formatText(doorName, true)}</div>
+                <button class="close-btn" id="closeBtn">×</button>
+              </div>
+              <div class="dialog-body">
+                <div class="dialog-status">
+                  <div class="dialog-status-dot"></div>
+                  <div class="dialog-status-text">${this.formatText(statusText)}${readerMode ? ` · ${this.formatText(readerMode.state)}` : ''} · Controlled by ${this.formatText(controlledBy)}</div>
+                </div>
+                ${this._showDoubleClickNote ? `<div class="dialog-note">${this.formatText('Note: Override buttons require double-click to activate')}</div>` : ''}
+                <div class="dialog-actions">
+                  <button class="dialog-action-btn pulse" id="dialogPulseBtn">
+                    <span class="dialog-btn-icon">⏱</span>
+                    ${this.formatText('Pulse')}
+                  </button>
+                  <button class="dialog-action-btn lockdown" id="dialogLockdownBtn">
+                    <span class="dialog-btn-icon">🔒</span>
+                    ${this.formatText('Lockdown')}
+                  </button>
+                  <button class="dialog-action-btn unlock" id="dialogUnlockBtn">
+                    <span class="dialog-btn-icon">🔓</span>
+                    ${this.formatText('Unlock')}
+                  </button>
+                  <button class="dialog-action-btn resume" id="dialogResumeBtn" ${!isOverrideOn ? 'disabled' : ''}>
+                    <span class="dialog-btn-icon">↩️</span>
+                    ${this.formatText('Resume')}
+                  </button>
+                </div>
+              </div>
+              <div class="dialog-progress">
+                <div class="dialog-progress-bar" id="dialogProgressBar"></div>
+              </div>
+            </div>
+          </div>
+        ` : ''}
       `;
-      
-      this.shadowRoot.getElementById('pulseBtn').addEventListener('click', (e) => {
+
+      const cardClick = this.shadowRoot.getElementById('cardClick');
+      const pulseBtn = this.shadowRoot.getElementById('pulseBtn');
+
+      // Pulse button - just pulse
+      pulseBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         this.pulseUnlock();
       });
+
+      // Only set up dialog if advanced mode is enabled
+      if (this._advanced) {
+        const dialogOverlay = this.shadowRoot.getElementById('dialogOverlay');
+        const dialogContent = this.shadowRoot.getElementById('dialogContent');
+        const dialogHeader = this.shadowRoot.querySelector('.dialog-header');
+        const closeBtn = this.shadowRoot.getElementById('closeBtn');
+        const dialogPulseBtn = this.shadowRoot.getElementById('dialogPulseBtn');
+        const dialogLockdownBtn = this.shadowRoot.getElementById('dialogLockdownBtn');
+        const dialogUnlockBtn = this.shadowRoot.getElementById('dialogUnlockBtn');
+        const dialogResumeBtn = this.shadowRoot.getElementById('dialogResumeBtn');
+        const dialogProgressBar = this.shadowRoot.getElementById('dialogProgressBar');
+
+        let autoCloseTimer = null;
+
+        // Card click - open dialog
+        cardClick.addEventListener('click', (e) => {
+          if (e.target.id !== 'pulseBtn') {
+            // Add dialog-open class to host to increase z-index
+            this.classList.add('dialog-open');
+
+            dialogOverlay.classList.add('open');
+            // Reset position when opening
+            dialogContent.style.position = 'relative';
+            dialogContent.style.left = '';
+            dialogContent.style.top = '';
+            dialogContent.style.transform = '';
+
+            // Restart progress bar animation
+            if (dialogProgressBar) {
+              dialogProgressBar.style.animation = 'none';
+              setTimeout(() => {
+                dialogProgressBar.style.animation = 'countdown 10s linear forwards';
+              }, 10);
+            }
+
+            // Clear any existing timer
+            if (autoCloseTimer) {
+              clearTimeout(autoCloseTimer);
+            }
+
+            // Set 10-second auto-close timer
+            autoCloseTimer = setTimeout(() => {
+              closeDialog();
+            }, 10000);
+          }
+        });
+
+        // Close dialog
+        const closeDialog = () => {
+          // Remove dialog-open class from host to reset z-index
+          this.classList.remove('dialog-open');
+
+          dialogOverlay.classList.remove('open');
+          // Clear the auto-close timer
+          if (autoCloseTimer) {
+            clearTimeout(autoCloseTimer);
+            autoCloseTimer = null;
+          }
+        };
+
+        closeBtn.addEventListener('click', closeDialog);
+
+        dialogOverlay.addEventListener('click', (e) => {
+          if (e.target === dialogOverlay) {
+            closeDialog();
+          }
+        });
+
+        dialogContent.addEventListener('click', (e) => {
+          e.stopPropagation();
+        });
+
+        // Make dialog draggable
+        let isDragging = false;
+        let currentX;
+        let currentY;
+        let initialX;
+        let initialY;
+
+        dialogHeader.addEventListener('mousedown', (e) => {
+          if (e.target.id === 'closeBtn' || e.target.closest('#closeBtn')) return;
+
+          isDragging = true;
+          dialogContent.classList.add('dragging');
+
+          const rect = dialogContent.getBoundingClientRect();
+          initialX = e.clientX - rect.left;
+          initialY = e.clientY - rect.top;
+
+          // Convert from flexbox centered to fixed positioning
+          dialogContent.style.position = 'fixed';
+          dialogContent.style.left = rect.left + 'px';
+          dialogContent.style.top = rect.top + 'px';
+          dialogContent.style.transform = 'none';
+
+          // Pause auto-close timer while dragging
+          if (autoCloseTimer) {
+            clearTimeout(autoCloseTimer);
+            autoCloseTimer = null;
+          }
+
+          // Pause progress bar animation
+          if (dialogProgressBar) {
+            dialogProgressBar.style.animationPlayState = 'paused';
+          }
+
+          e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+          if (!isDragging) return;
+
+          e.preventDefault();
+          currentX = e.clientX - initialX;
+          currentY = e.clientY - initialY;
+
+          dialogContent.style.left = currentX + 'px';
+          dialogContent.style.top = currentY + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+          if (isDragging) {
+            isDragging = false;
+            dialogContent.classList.remove('dragging');
+
+            // Restart auto-close timer (full 10 seconds)
+            if (autoCloseTimer) {
+              clearTimeout(autoCloseTimer);
+            }
+            autoCloseTimer = setTimeout(() => {
+              closeDialog();
+            }, 10000);
+
+            // Restart progress bar animation
+            if (dialogProgressBar) {
+              dialogProgressBar.style.animation = 'none';
+              setTimeout(() => {
+                dialogProgressBar.style.animation = 'countdown 10s linear forwards';
+              }, 10);
+            }
+          }
+        });
+
+        // Touch support for mobile
+        dialogHeader.addEventListener('touchstart', (e) => {
+          if (e.target.id === 'closeBtn' || e.target.closest('#closeBtn')) return;
+
+          isDragging = true;
+          dialogContent.classList.add('dragging');
+
+          const rect = dialogContent.getBoundingClientRect();
+          const touch = e.touches[0];
+          initialX = touch.clientX - rect.left;
+          initialY = touch.clientY - rect.top;
+
+          // Convert from flexbox centered to fixed positioning
+          dialogContent.style.position = 'fixed';
+          dialogContent.style.left = rect.left + 'px';
+          dialogContent.style.top = rect.top + 'px';
+          dialogContent.style.transform = 'none';
+
+          // Pause auto-close timer while dragging
+          if (autoCloseTimer) {
+            clearTimeout(autoCloseTimer);
+            autoCloseTimer = null;
+          }
+
+          // Pause progress bar animation
+          if (dialogProgressBar) {
+            dialogProgressBar.style.animationPlayState = 'paused';
+          }
+
+          e.preventDefault();
+        });
+
+        document.addEventListener('touchmove', (e) => {
+          if (!isDragging) return;
+
+          e.preventDefault();
+          const touch = e.touches[0];
+          currentX = touch.clientX - initialX;
+          currentY = touch.clientY - initialY;
+
+          dialogContent.style.left = currentX + 'px';
+          dialogContent.style.top = currentY + 'px';
+        }, { passive: false });
+
+        document.addEventListener('touchend', () => {
+          if (isDragging) {
+            isDragging = false;
+            dialogContent.classList.remove('dragging');
+
+            // Restart auto-close timer (full 10 seconds)
+            if (autoCloseTimer) {
+              clearTimeout(autoCloseTimer);
+            }
+            autoCloseTimer = setTimeout(() => {
+              closeDialog();
+            }, 10000);
+
+            // Restart progress bar animation
+            if (dialogProgressBar) {
+              dialogProgressBar.style.animation = 'none';
+              setTimeout(() => {
+                dialogProgressBar.style.animation = 'countdown 10s linear forwards';
+              }, 10);
+            }
+          }
+        });
+
+        // Dialog action buttons
+        dialogPulseBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.pulseUnlock();
+        });
+
+        dialogLockdownBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.lockdownDoor();
+        });
+
+        dialogUnlockBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.unlockDoor();
+        });
+
+        dialogResumeBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.resumeDoor();
+        });
+      } else {
+        // If not in advanced mode, clicking the card (outside pulse button) should pulse
+        cardClick.addEventListener('click', (e) => {
+          if (e.target.id !== 'pulseBtn' && !e.target.closest('#pulseBtn')) {
+            this.pulseUnlock();
+          }
+        });
+      }
+
       return;
     }
 
@@ -220,7 +786,11 @@ class HartmanDoorLockCard extends HTMLElement {
       this.shadowRoot.innerHTML = `
         <style>
           * { box-sizing: border-box; margin: 0; padding: 0; }
-          :host { display: block; }
+          :host {
+            display: block;
+            position: relative;
+            z-index: 1;
+          }
           
           .pulse-card {
             background: var(--ha-card-background, #fff);
@@ -308,13 +878,18 @@ class HartmanDoorLockCard extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        :host { display: block; }
+        :host {
+          display: block;
+          position: relative;
+          z-index: 1;
+        }
 
         .card {
           background: var(--ha-card-background, #fff);
           border-radius: 12px;
-          overflow: hidden;
+          overflow: visible;
           box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+          position: relative;
         }
 
         .header {
@@ -417,6 +992,8 @@ class HartmanDoorLockCard extends HTMLElement {
 
         .advanced {
           border-top: 1px solid var(--divider-color, #eee);
+          position: relative;
+          z-index: 2;
         }
 
         .advanced-header {
@@ -427,6 +1004,7 @@ class HartmanDoorLockCard extends HTMLElement {
           align-items: center;
           background: var(--secondary-background-color, #fafafa);
           transition: background 0.2s;
+          position: relative;
         }
 
         .advanced-header:hover {
@@ -500,6 +1078,8 @@ class HartmanDoorLockCard extends HTMLElement {
           font-family: inherit;
           color: var(--primary-text-color, #333);
           transition: border-color 0.2s, opacity 0.2s;
+          position: relative;
+          z-index: 3;
         }
 
         input[type="number"]:focus,
@@ -605,7 +1185,7 @@ class HartmanDoorLockCard extends HTMLElement {
           <div>
             <div class="door-name">${this.formatText(doorName, true)}</div>
             <div class="door-status">${this.formatText(statusText)}${readerMode ? ` · ${this.formatText(readerMode.state)}` : ''} · Controlled by ${this.formatText(controlledBy)}</div>
-            ${this._advanced ? `<div class="override-note">${this.formatText('Note: Override buttons require double-click to activate')}</div>` : ''}
+            ${this._advanced && this._showDoubleClickNote ? `<div class="override-note">${this.formatText('Note: Override buttons require double-click to activate')}</div>` : ''}
           </div>
         </div>
 
@@ -868,7 +1448,9 @@ class HartmanDoorLockCard extends HTMLElement {
       columns: 4,
       name_text_case: "uppercase",
       text_case: "uppercase",
-      show_log: true
+      show_log: true,
+      purple_outline: true,
+      show_double_click_note: true
     };
   }
 }
@@ -1087,9 +1669,33 @@ class HartmanDoorLockCardEditor extends HTMLElement {
         <div class="hint" style="margin-left: 26px;">Display the last door access log in advanced mode</div>
       </div>
 
+      <div class="config-row">
+        <label class="checkbox-label">
+          <input
+            type="checkbox"
+            id="purple_outline"
+            ${this._config?.purple_outline !== false ? 'checked' : ''}
+          />
+          Purple Outline on Grid Cards
+        </label>
+        <div class="hint" style="margin-left: 26px;">Add a purple border around pulse grid cards</div>
+      </div>
+
+      <div class="config-row">
+        <label class="checkbox-label">
+          <input
+            type="checkbox"
+            id="show_double_click_note"
+            ${this._config?.show_double_click_note !== false ? 'checked' : ''}
+          />
+          Show Double-Click Note
+        </label>
+        <div class="hint" style="margin-left: 26px;">Display note about double-clicking override buttons</div>
+      </div>
+
       <div style="text-align: center; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--divider-color, #eee);">
         <div style="font-size: 10px; color: var(--secondary-text-color, #999); text-transform: uppercase; letter-spacing: 0.5px;">
-          Hartman Door Lock Card v1.1.0
+          Hartman Door Lock Card v1.2.0
         </div>
       </div>
     `;
@@ -1102,6 +1708,8 @@ class HartmanDoorLockCardEditor extends HTMLElement {
     const nameTextCaseSelect = this.shadowRoot.getElementById('name_text_case');
     const textCaseSelect = this.shadowRoot.getElementById('text_case');
     const showLogInput = this.shadowRoot.getElementById('show_log');
+    const purpleOutlineInput = this.shadowRoot.getElementById('purple_outline');
+    const showDoubleClickNoteInput = this.shadowRoot.getElementById('show_double_click_note');
 
     entitySelect.addEventListener('change', (e) => {
       this._config = { ...this._config, entity: e.target.value };
@@ -1152,6 +1760,16 @@ class HartmanDoorLockCardEditor extends HTMLElement {
       this._config = { ...this._config, show_log: e.target.checked };
       this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._config } }));
     });
+
+    purpleOutlineInput.addEventListener('change', (e) => {
+      this._config = { ...this._config, purple_outline: e.target.checked };
+      this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._config } }));
+    });
+
+    showDoubleClickNoteInput.addEventListener('change', (e) => {
+      this._config = { ...this._config, show_double_click_note: e.target.checked };
+      this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._config } }));
+    });
   }
 }
 
@@ -1166,7 +1784,7 @@ window.customCards.push({
 });
 
 console.info(
-  '%c HARTMAN-DOOR-LOCK-CARD %c 1.1.0 ',
+  '%c HARTMAN-DOOR-LOCK-CARD %c 1.2.0 ',
   'color: white; background: #4caf50; font-weight: 700;',
   'color: #4caf50; background: white; font-weight: 700;'
 );
